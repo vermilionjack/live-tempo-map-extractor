@@ -1,4 +1,4 @@
-name: Live Tempo Map Extractor — Windows build
+name: Tempo Map Extractor — Windows build
 
 on:
   workflow_dispatch:
@@ -11,6 +11,8 @@ permissions:
 jobs:
   test-and-build:
     runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -24,14 +26,25 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Compile and test
         run: |
-          python -m compileall -q app.py core.py tests
+          python -m compileall -q app.py core.py smoke_test.py readers tests
           python -m unittest discover -s tests -v
       - name: Build Windows executable
-        run: python -m PyInstaller --noconfirm --clean --windowed --onefile --name "Live-Tempo-Map-Extractor" app.py
-      - name: Upload executable
+        run: python -m PyInstaller --noconfirm --clean --windowed --onefile --name "Tempo-Map-Extractor" app.py
+      - name: Test packaged Windows runtime
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist/Tempo-Map-Extractor.exe" -ArgumentList "--smoke-test", "smoke-report.json" -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "Runtime smoke test timed out" }
+          if ($p.ExitCode -ne 0) { throw "Runtime smoke test failed: $($p.ExitCode)" }
+          $report = Get-Content smoke-report.json -Raw | ConvertFrom-Json
+          if (-not $report.ok) { throw "Runtime smoke test reported failure" }
+          Get-Content smoke-report.json
+      - name: Upload executable and runtime evidence
         uses: actions/upload-artifact@v4
         with:
-          name: Live-Tempo-Map-Extractor-windows-x64
-          path: dist/Live-Tempo-Map-Extractor.exe
+          name: Tempo-Map-Extractor-windows-x64
+          path: |
+            dist/Tempo-Map-Extractor.exe
+            smoke-report.json
           if-no-files-found: error
           retention-days: 30

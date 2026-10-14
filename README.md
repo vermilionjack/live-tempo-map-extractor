@@ -1,6 +1,6 @@
-# Live Tempo Map Extractor
+# Tempo Map Extractor
 
-A small desktop tool for Ableton Live projects tempomap extraction. Add project files, check the tempo maps it extracts, and export them.
+A desktop tool to inspect tempo maps and time signatures from DAW project files and export MIDI tempo tracks or CSV. Tested input subsets include Ableton Live, REAPER, MIDI and legacy Ardour, with opt-in experimental DAWproject, LMMS, Studio One and modern Ardour readers. This is not a universal DAW-project converter.
 
 ## Run
     pip install PySide6
@@ -16,7 +16,7 @@ Native FL Studio, Bitwig, Logic, Pro Tools, Cubase, Nuendo and Samplitude tempo-
 ## Tests
     QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 
-Existing v0.1 release binaries have not been updated with this work.
+Version **v.01.1** includes the corrected readers, GUI lifecycle fixes and opt-in experimental imports. Download the Windows x64 executable or macOS Apple Silicon ZIP from Releases. The macOS build is not notarized, and the Windows executable is unsigned. The archived v0.1 binaries predate these changes.
 
 ## Keyboard
 | Action | Shortcut |

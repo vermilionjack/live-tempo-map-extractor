@@ -1,4 +1,4 @@
-"""Live Tempo Map Extractor: compact desktop GUI.
+"""Tempo Map Extractor: compact desktop GUI.
 
 Run:  python app.py [files or folders ...]
 Requires: PySide6  (pip install PySide6)
@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
 
 import core
 
-APP_NAME = "Live Tempo Map Extractor"
+APP_NAME = "Tempo Map Extractor"
+APP_VERSION = "v.01.1"
 ROLE_PROGRESS = Qt.UserRole + 1   # float 0..1 while busy, None otherwise
 ROLE_STATE = Qt.UserRole + 2      # "queued" | "reading" | "ok" | "error" | "exported"
 COL_FILE, COL_STATUS, COL_POINTS, COL_BPM = range(4)
@@ -657,8 +658,12 @@ QIconNone = QIcon()
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+        from smoke_test import run
+        sys.exit(run(Path(sys.argv[2])))
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
     w = MainWindow()
     w.setMinimumSize(520, 360)
     w.show()
