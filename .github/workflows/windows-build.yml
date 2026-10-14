@@ -28,8 +28,16 @@ jobs:
         run: |
           python -m compileall -q app.py core.py smoke_test.py readers tests
           python -m unittest discover -s tests -v
-      - name: Build Windows executable
-        run: python -m PyInstaller --noconfirm --clean --windowed --onefile --name "Tempo-Map-Extractor" app.py
+      - name: Build Windows executable with Qt ICU runtime
+        run: python build_support/build_windows.py
+      - name: Verify Qt ICU DLLs are bundled
+        shell: pwsh
+        run: |
+          $names = (python -m PyInstaller.utils.cliutils.archive_viewer -b dist/Tempo-Map-Extractor.exe) -join "`n"
+          foreach ($dll in @('icudt', 'icuin', 'icuuc')) {
+            if ($names -notmatch "PySide6.*$dll.*\.dll") { throw "Missing bundled Qt ICU DLL matching $dll" }
+          }
+          Write-Output "Qt ICU runtime DLLs are present in the executable archive."
       - name: Test packaged Windows runtime
         shell: pwsh
         run: |
