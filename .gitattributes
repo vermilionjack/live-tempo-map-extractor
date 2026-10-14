@@ -1,0 +1,3 @@
+# Source text uses stable LF endings; provenance fixtures must remain byte-exact.
+* text=auto eol=lf
+tests/fixtures/** -text
