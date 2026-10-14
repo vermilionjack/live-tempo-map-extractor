@@ -6,6 +6,7 @@ Add a reader for a new project format by writing a function
 from __future__ import annotations
 
 import csv
+import gzip
 import math
 import re
 import struct
@@ -190,6 +191,100 @@ def read_rpp(path: Path, progress: Progress) -> TempoMap:
     return TempoMap(path, _dedupe(points))
 
 
+def read_als(path: Path, progress: Progress) -> TempoMap:
+    """Read an Ableton Live Set (.als) project.
+
+    An .als file is gzip-compressed XML. Tempo and time-signature automation live
+    under the MasterTrack as floating-point automation events. Each event carries
+    a beat position (``Time``) and a value (``Value``). Time is in quarter notes
+    from the project start; values are BPM for tempo and (numerator, denominator)
+    for time signatures. Negative-Time events are pre-roll sentinels and are
+    skipped. Between consecutive tempo points Ableton ramps linearly, so each
+    point inherits the *ramp* flag of its predecessor.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        text = gzip.decompress(path.read_bytes())
+    except OSError as exc:
+        raise ReaderError("File is not a valid gzip archive (is this a .als?)") from exc
+    except EOFError as exc:
+        raise ReaderError("Compressed data is truncated or corrupt") from exc
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise ReaderError("Could not parse the XML inside the .als file") from exc
+
+    # Locate the MasterTrack. Live 12 uses <MainTrack>, Live 11 and earlier
+    # <MasterTrack>; both hold the tempo/time-signature device chain.
+    master = None
+    for tag in ("MasterTrack", "MainTrack"):
+        master = root.find(f".//LiveSet/{tag}/DeviceChain/Mixer")
+        if master is not None:
+            break
+    if master is None:
+        master = root.find(".//LiveSet/MasterTrack")
+    if master is None:
+        raise ReaderError("No MasterTrack found (is this an Ableton Live Set?)")
+
+    tempo_points: list[TempoPoint] = []
+    meter_events: list[tuple[float, int, int]] = []
+
+    tempo_el = master.find(".//Tempo/ArrangerAutomation/Events")
+    if tempo_el is not None:
+        events = [(float(ev.get("Time", "0")), float(ev.get("Value", "120")))
+                  for ev in list(tempo_el) if ev.tag == "FloatEvent"]
+        events.sort(key=lambda e: e[0])
+        total = len(events)
+        for i, (t, bpm) in enumerate(events):
+            # A large negative Time is Ableton's "before project start" sentinel:
+            # it carries the initial tempo value and must be normalised to 0.
+            beat = 0.0 if t < 0 else t
+            tempo_points.append(TempoPoint(beat, beat, bpm))
+            progress((i + 1) / max(total, 1))
+    if not tempo_points:
+        tempo_points = [TempoPoint(0.0, 0.0, 120.0)]
+
+    ts_el = master.find(".//TimeSignature/ArrangerAutomation/Events")
+    if ts_el is not None:
+        for ev in list(ts_el):
+            if ev.tag != "FloatEvent":
+                continue
+            t = float(ev.get("Time", "0"))
+            if t < 0:
+                continue
+            # Value packs numerator << 8 | denominator
+            raw = int(float(ev.get("Value", "0")))
+            num = raw >> 8
+            den = raw & 0xFF
+            if num and den:
+                meter_events.append((t, num, den))
+
+    # Convert the meter events into TempoPoint time-signature changes, then
+    # merge them into the tempo points so bar/beat counting stays consistent.
+    points = _apply_meters(tempo_points, meter_events)
+    _fill_times_from_beats(points)
+    points[-1].ramp = False
+    return TempoMap(path, _dedupe(points))
+
+
+def _apply_meters(tempo: list[TempoPoint], meters: list[tuple[float, int, int]]) -> list[TempoPoint]:
+    """Attach the correct (num, den) to each tempo point based on meter
+    automation. A meter change at or before a point's time applies to that point."""
+    if not meters:
+        return tempo
+    meters.sort(key=lambda m: m[0])
+    out: list[TempoPoint] = []
+    cur_num, cur_den = 4, 4
+    mi = 0
+    for p in tempo:
+        while mi < len(meters) and meters[mi][0] <= p.beat + 1e-9:
+            cur_num, cur_den = meters[mi][1], meters[mi][2]
+            mi += 1
+        out.append(TempoPoint(p.beat, p.time, p.bpm, cur_num, cur_den, p.ramp))
+    return out
+
+
 def _dedupe(points: list[TempoPoint]) -> list[TempoPoint]:
     out: list[TempoPoint] = []
     for p in points:
@@ -202,7 +297,7 @@ def _dedupe(points: list[TempoPoint]) -> list[TempoPoint]:
 
 READERS: dict[str, Callable[[Path, Progress], TempoMap]] = {
     ".mid": read_midi, ".midi": read_midi, ".smf": read_midi,
-    ".rpp": read_rpp,
+    ".rpp": read_rpp, ".als": read_als,
 }
 SUPPORTED_EXTENSIONS = tuple(sorted(READERS))
 
