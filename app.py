@@ -9,7 +9,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import (QObject, QRunnable, QSettings, QSize, Qt, QThreadPool,
+from PySide6.QtCore import (QObject, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer,
                             Signal, Slot)
 from PySide6.QtGui import QAction, QKeySequence, QPalette, QColor
 from PySide6.QtWidgets import (
@@ -69,6 +69,48 @@ class ExportJob(QRunnable):
         except Exception:
             traceback.print_exc()
             self.signals.failed.emit(key, "Export failed: unexpected error")
+
+
+class JobCallbacks(QObject):
+    """Dispatch on the GUI thread and reject results for obsolete list entries."""
+
+    def __init__(self, window, job, generation, exporting=False):
+        super().__init__(window)
+        self.window, self.job = window, job
+        self.generation, self.exporting = generation, exporting
+        job.signals.progress.connect(self.progress)
+        job.signals.finished.connect(self.finished)
+        job.signals.failed.connect(self.failed)
+
+    def current(self, key):
+        return (not self.window._closing
+                and self.window._generations.get(key) is self.generation)
+
+    @Slot(str, float)
+    def progress(self, key, frac):
+        if self.current(key):
+            self.window._on_progress(key, frac)
+
+    @Slot(str, object)
+    def finished(self, key, result):
+        if self.exporting and not self.window._closing:
+            self.window._on_exported(key, result, self.current(key))
+        elif self.current(key):
+            self.window._on_read(key, result)
+        self.release()
+
+    @Slot(str, str)
+    def failed(self, key, message):
+        if self.exporting and not self.window._closing:
+            self.window._on_export_failed(key, message, self.current(key))
+        elif self.current(key):
+            self.window._on_failed(key, message)
+        self.release()
+
+    def release(self):
+        self.window.jobs.discard(self.job)
+        self.job = None
+        self.deleteLater()
 
 
 # --------------------------------------------------------------------------- widgets
@@ -171,10 +213,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setAcceptDrops(True)
         self.settings = QSettings("AP Productions", APP_NAME)
-        self.pool = QThreadPool.globalInstance()
+        self.pool = QThreadPool(self)
         self.items: dict[str, QTreeWidgetItem] = {}
         self.maps: dict[str, core.TempoMap] = {}
         self.jobs: set = set()             # keep runnables' signal objects alive
+        self._generations: dict[str, object] = {}
+        self._closing = False
+        self._exporting = False
+        self._close_timer = QTimer(self)
+        self._close_timer.setInterval(25)
+        self._close_timer.timeout.connect(self._finish_close)
         self.opt = self._load_options()
         self.out_dir: Path | None = None
         self._build_ui()
@@ -280,6 +328,8 @@ class MainWindow(QMainWindow):
             self.add_paths([Path(d)])
 
     def add_paths(self, paths):
+        if self._closing:
+            return
         found, skipped = [], 0
         for p in paths:
             if p.is_dir():
@@ -292,9 +342,17 @@ class MainWindow(QMainWindow):
         if paths:
             first = paths[0]
             self.settings.setValue("last_dir", str(first if first.is_dir() else first.parent))
-        new = [f for f in found if str(f.resolve()) not in self.items]
+        # Deduplicate this batch too (folders and explicit files can overlap).
+        seen = set(self.items)
+        new = []
+        for f in found:
+            resolved = f.resolve()
+            key = str(resolved)
+            if key not in seen:
+                seen.add(key)
+                new.append(resolved)
         for f in new:
-            self._queue_read(f.resolve())
+            self._queue_read(f)
         msg = f"Added {len(new)} file{'s' * (len(new) != 1)}"
         if dup := len(found) - len(new):
             msg += f", {dup} already listed"
@@ -308,6 +366,8 @@ class MainWindow(QMainWindow):
         self._update_state()
 
     def _queue_read(self, path: Path):
+        if self._closing:
+            return
         key = str(path)
         item = self.items.get(key)
         if item is None:
@@ -317,18 +377,15 @@ class MainWindow(QMainWindow):
                 item.setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
             self.files.addTopLevelItem(item); self.items[key] = item
         self.maps.pop(key, None)
+        generation = self._generations[key] = object()
         self._set_status(item, "reading", "Queued", progress=0.0)
         item.setText(COL_POINTS, ""); item.setText(COL_BPM, "")
         job = ReadJob(path)
-        job.signals.progress.connect(self._on_progress)
-        job.signals.finished.connect(self._on_read)
-        job.signals.failed.connect(self._on_failed)
-        self._start(job)
+        self._start(job, generation)
 
-    def _start(self, job):
+    def _start(self, job, generation, exporting=False):
         job.setAutoDelete(False); self.jobs.add(job)
-        job.signals.finished.connect(lambda *_: self.jobs.discard(job))
-        job.signals.failed.connect(lambda *_: self.jobs.discard(job))
+        job.callbacks = JobCallbacks(self, job, generation, exporting)
         self.pool.start(job)
 
     # ---------- worker callbacks
@@ -422,16 +479,19 @@ class MainWindow(QMainWindow):
         for item in self.files.selectedItems():
             key = item.data(COL_FILE, Qt.UserRole)
             self.items.pop(key, None); self.maps.pop(key, None)
+            self._generations.pop(key, None)
             self.files.takeTopLevelItem(self.files.indexOfTopLevelItem(item))
         self._show_selected(); self._update_state()
 
     def clear_all(self):
         self.files.clear(); self.items.clear(); self.maps.clear()
+        self._generations.clear()
         self._show_selected(); self._update_state()
 
     def reload_selected(self):
         for item in self.files.selectedItems() or []:
             self._queue_read(Path(item.data(COL_FILE, Qt.UserRole)))
+        self._show_selected(); self._update_state()
 
     def _update_state(self):
         n = self.files.topLevelItemCount()
@@ -440,7 +500,8 @@ class MainWindow(QMainWindow):
         busy = sum(self.items[k].data(COL_STATUS, ROLE_STATE) == "reading" for k in self.items)
         for a in (self.act_remove, self.act_clear, self.act_retry):
             a.setEnabled(n > 0)
-        self.act_export.setEnabled(ready > 0); self.export_btn.setEnabled(ready > 0)
+        can_export = ready > 0 and not self._exporting and not self._closing
+        self.act_export.setEnabled(can_export); self.export_btn.setEnabled(can_export)
         if n:
             parts = [f"{n} file{'s' * (n != 1)}", f"{ready} ready"]
             if busy: parts.append(f"{busy} reading")
@@ -489,6 +550,8 @@ class MainWindow(QMainWindow):
 
     # ---------- export
     def export(self):
+        if self._exporting or self._closing:
+            return
         sel = [i.data(COL_FILE, Qt.UserRole) for i in self.files.selectedItems()]
         keys = [k for k in (sel or self.items) if k in self.maps]
         if not keys:
@@ -499,37 +562,39 @@ class MainWindow(QMainWindow):
         suffix, writer = core.EXPORTERS[self.fmt.currentText()]
         self.settings.setValue("format", self.fmt.currentText())
         self._pending, self._done, self._fail = len(keys), 0, 0
+        self._exporting = True
         self.export_btn.setEnabled(False); self.act_export.setEnabled(False)
         taken = set()
         for k in keys:
             tm = self.maps[k]
             dest = core.export_path(tm, self.out_dir, suffix, self.opt.overwrite)
-            while dest in taken:                    # same file name from different folders
-                dest = dest.with_name(dest.stem + "_" + suffix)
+            base, number = dest, 1
+            while dest in taken or (not self.opt.overwrite and dest.exists()):
+                dest = base.with_name(f"{base.stem} ({number}){suffix}")
+                number += 1
             taken.add(dest)
             self._set_status(self.items[k], "reading", "Exporting", progress=0.5)
             job = ExportJob(tm, writer, dest, self.opt)
-            job.signals.finished.connect(self._on_exported)
-            job.signals.failed.connect(self._on_export_failed)
-            self._start(job)
+            self._start(job, self._generations[k], exporting=True)
 
     @Slot(str, object)
-    def _on_exported(self, key, res):
+    def _on_exported(self, key, res, current=True):
         dest, n = res
-        if item := self.items.get(key):
+        if current and (item := self.items.get(key)):
             self._set_status(item, "exported", f"Exported · {n} events")
             item.setToolTip(COL_STATUS, str(dest))
         self._done += 1; self._export_tick()
 
     @Slot(str, str)
-    def _on_export_failed(self, key, msg):
-        if item := self.items.get(key):
+    def _on_export_failed(self, key, msg, current=True):
+        if current and (item := self.items.get(key)):
             self._set_status(item, "error", msg); item.setToolTip(COL_STATUS, msg)
         self._fail += 1; self._export_tick()
 
     def _export_tick(self):
         if self._done + self._fail < self._pending:
             return
+        self._exporting = False
         self._update_state()
         where = self.out_dir or "source folders"
         msg = f"Exported {self._done} file{'s' * (self._done != 1)} to {where}"
@@ -557,8 +622,22 @@ class MainWindow(QMainWindow):
             self.resize(self.sizeHint())
 
     def closeEvent(self, e):
+        self._closing = True
+        if self.jobs or self.pool.activeThreadCount():
+            # Keep signal receivers and runnables alive until queued/running work
+            # has drained; never block the event loop in waitForDone().
+            e.ignore()
+            self.setEnabled(False)
+            self.statusBar().showMessage("Waiting for background jobs to finish…")
+            self._close_timer.start()
+            return
+        self._close_timer.stop()
         self.settings.setValue("geometry", self.saveGeometry())
         super().closeEvent(e)
+
+    def _finish_close(self):
+        if not self.jobs and not self.pool.activeThreadCount():
+            self.close()
 
 
 from PySide6.QtGui import QIcon  # noqa: E402
