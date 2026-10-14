@@ -1,0 +1,37 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile and test
+        run: |
+          python -m compileall -q app.py core.py tests
+          python -m unittest discover -s tests -v
+      - name: Build Windows executable
+        run: python -m PyInstaller --noconfirm --clean --windowed --onefile --name "Tempo Map Extractor" app.py
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tempo-Map-Extractor-windows-x64
+          path: dist/Tempo Map Extractor.exe
+          if-no-files-found: error
+          retention-days: 30
