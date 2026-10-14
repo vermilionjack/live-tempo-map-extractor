@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 import core
 
 APP_NAME = "Tempo Map Extractor"
-APP_VERSION = "v.01.1"
+APP_VERSION = "v.0.1.2"
 ROLE_PROGRESS = Qt.UserRole + 1   # float 0..1 while busy, None otherwise
 ROLE_STATE = Qt.UserRole + 2      # "queued" | "reading" | "ok" | "error" | "exported"
 COL_FILE, COL_STATUS, COL_POINTS, COL_BPM = range(4)
