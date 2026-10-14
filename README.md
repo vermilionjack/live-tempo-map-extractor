@@ -1,6 +1,6 @@
 # Tempo Map Extractor
 
-A small desktop tool. Add project files, check the tempo maps it extracts, and export them.
+A small desktop tool for Ableton Live projects tempomap extraction. Add project files, check the tempo maps it extracts, and export them.
 
 ## Run
     pip install PySide6
