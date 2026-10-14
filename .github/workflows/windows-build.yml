@@ -1,4 +1,4 @@
-name: Windows build
+name: Live Tempo Map Extractor — Windows build
 
 on:
   workflow_dispatch:
@@ -27,11 +27,11 @@ jobs:
           python -m compileall -q app.py core.py tests
           python -m unittest discover -s tests -v
       - name: Build Windows executable
-        run: python -m PyInstaller --noconfirm --clean --windowed --onefile --name "Tempo Map Extractor" app.py
+        run: python -m PyInstaller --noconfirm --clean --windowed --onefile --name "Live-Tempo-Map-Extractor" app.py
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: Tempo-Map-Extractor-windows-x64
-          path: dist/Tempo Map Extractor.exe
+          name: Live-Tempo-Map-Extractor-windows-x64
+          path: dist/Live-Tempo-Map-Extractor.exe
           if-no-files-found: error
           retention-days: 30
