@@ -10,6 +10,7 @@ import gzip
 import math
 import re
 import struct
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -25,7 +26,8 @@ class TempoPoint:
     bpm: float
     num: int = 4
     den: int = 4
-    ramp: bool = False   # True: tempo ramps linearly (in time) to the next point
+    ramp: bool = False   # True: tempo ramps linearly to the next point
+    ramp_domain: str = "time"  # REAPER: time; Ableton: beat
 
 
 @dataclass
@@ -82,9 +84,26 @@ def _fill_beats_from_times(points: list[TempoPoint]) -> None:
         cur.beat = prev.beat + avg * dt / 60.0
 
 
+def _beat_ramp_time_at(q: float, b0: float, b1: float, span_q: float) -> float:
+    """Integral of 60/BPM over q beats of a beat-linear segment."""
+    if span_q <= 0:
+        return 0.0
+    slope = (b1 - b0) / span_q
+    if abs(b1 - b0) < 1e-12:
+        return 60.0 * q / b0
+    return 60.0 * math.log1p(slope * q / b0) / slope
+
+
 def _fill_times_from_beats(points: list[TempoPoint]) -> None:
     for prev, cur in zip(points, points[1:]):
-        cur.time = prev.time + (cur.beat - prev.beat) * 60.0 / prev.bpm
+        span = cur.beat - prev.beat
+        if prev.ramp and prev.ramp_domain == "beat":
+            dt = _beat_ramp_time_at(span, prev.bpm, cur.bpm, span)
+        elif prev.ramp:
+            dt = 120.0 * span / (prev.bpm + cur.bpm)
+        else:
+            dt = span * 60.0 / prev.bpm
+        cur.time = prev.time + dt
 
 
 # --------------------------------------------------------------------------- readers
@@ -192,96 +211,170 @@ def read_rpp(path: Path, progress: Progress) -> TempoMap:
 
 
 def read_als(path: Path, progress: Progress) -> TempoMap:
-    """Read an Ableton Live Set (.als) project.
+    """Read arrangement tempo from observed Live 8/9 and 10/12 XML layouts.
 
-    An .als file is gzip-compressed XML. Tempo and time-signature automation live
-    under the MasterTrack as floating-point automation events. Each event carries
-    a beat position (``Time``) and a value (``Value``). Time is in quarter notes
-    from the project start; values are BPM for tempo and (numerator, denominator)
-    for time signatures. Negative-Time events are pre-roll sentinels and are
-    skipped. Between consecutive tempo points Ableton ramps linearly, so each
-    point inherits the *ramp* flag of its predecessor.
+    Envelope-target lookup and sentinel handling are based on dawtool's real
+    Live fixtures (see tests/fixtures/als/README.md). Times use the continuous
+    integral of beat-linear BPM, not REAPER's time-linear ramps. Live playback
+    quantization is not emulated; curved envelopes are rejected explicitly.
     """
     import xml.etree.ElementTree as ET
 
     try:
         text = gzip.decompress(path.read_bytes())
-    except OSError as exc:
-        raise ReaderError("File is not a valid gzip archive (is this a .als?)") from exc
-    except EOFError as exc:
-        raise ReaderError("Compressed data is truncated or corrupt") from exc
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ReaderError("Invalid or corrupt gzip data (is this a .als?)") from exc
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise ReaderError("Could not parse the XML inside the .als file") from exc
 
-    # Locate the MasterTrack. Live 12 uses <MainTrack>, Live 11 and earlier
-    # <MasterTrack>; both hold the tempo/time-signature device chain.
-    master = None
-    for tag in ("MasterTrack", "MainTrack"):
-        master = root.find(f".//LiveSet/{tag}/DeviceChain/Mixer")
-        if master is not None:
-            break
-    if master is None:
-        master = root.find(".//LiveSet/MasterTrack")
-    if master is None:
-        raise ReaderError("No MasterTrack found (is this an Ableton Live Set?)")
+    live_set = root.find("LiveSet") if root.tag == "Ableton" else None
+    if live_set is None:
+        raise ReaderError("No Ableton LiveSet found")
+    track = live_set.find("MainTrack")
+    if track is None:
+        track = live_set.find("MasterTrack")
+    if track is None:
+        raise ReaderError("No MainTrack or MasterTrack found")
+    mixer = track.find("DeviceChain/Mixer")
+    if mixer is None:
+        mixer = track.find("MasterChain/Mixer")  # observed Live 8 layout
+    if mixer is None:
+        raise ReaderError("No main/master mixer found")
+    tempo = mixer.find("Tempo")
+    if tempo is None:
+        raise ReaderError("No main/master Tempo parameter found")
+    warnings: list[str] = []
 
-    tempo_points: list[TempoPoint] = []
-    meter_events: list[tuple[float, int, int]] = []
+    def number(el, attribute, label):
+        raw = el.get(attribute) if el is not None else None
+        if raw is None:
+            raise ReaderError(f"Missing {label}")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ReaderError(f"Missing or invalid {label}") from exc
+        if not math.isfinite(value):
+            raise ReaderError(f"Non-finite {label}")
+        return value
 
-    tempo_el = master.find(".//Tempo/ArrangerAutomation/Events")
-    if tempo_el is not None:
-        events = [(float(ev.get("Time", "0")), float(ev.get("Value", "120")))
-                  for ev in list(tempo_el) if ev.tag == "FloatEvent"]
-        events.sort(key=lambda e: e[0])
-        total = len(events)
-        for i, (t, bpm) in enumerate(events):
-            # A large negative Time is Ableton's "before project start" sentinel:
-            # it carries the initial tempo value and must be normalised to 0.
-            beat = 0.0 if t < 0 else t
-            tempo_points.append(TempoPoint(beat, beat, bpm))
-            progress((i + 1) / max(total, 1))
-    if not tempo_points:
-        tempo_points = [TempoPoint(0.0, 0.0, 120.0)]
+    def events_for(parameter):
+        if parameter is None:
+            return []
+        target = parameter.find("AutomationTarget")
+        if target is not None and not target.get("Id"):
+            raise ReaderError("Missing automation target Id")
+        if target is not None:
+            matches = []
+            for env in track.findall("AutomationEnvelopes/Envelopes/AutomationEnvelope"):
+                pointee = env.find("EnvelopeTarget/PointeeId")
+                if pointee is not None and pointee.get("Value") == target.get("Id"):
+                    matches.append(env)
+            if len(matches) > 1:
+                raise ReaderError("Ambiguous duplicate automation envelopes")
+            if matches:
+                events = matches[0].find("Automation/Events")
+                if events is None:
+                    raise ReaderError("Automation envelope has no Events")
+                return list(events)
+        events = parameter.find("ArrangerAutomation/Events")
+        return list(events) if events is not None else []
 
-    ts_el = master.find(".//TimeSignature/ArrangerAutomation/Events")
-    if ts_el is not None:
-        for ev in list(ts_el):
-            if ev.tag != "FloatEvent":
-                continue
-            t = float(ev.get("Time", "0"))
-            if t < 0:
-                continue
-            # Value packs numerator << 8 | denominator
-            raw = int(float(ev.get("Value", "0")))
-            num = raw >> 8
-            den = raw & 0xFF
-            if num and den:
-                meter_events.append((t, num, den))
+    def parsed_events(parameter, tag, decode):
+        out = []
+        for ev in events_for(parameter):
+            if ev.tag != tag:
+                raise ReaderError(f"Unsupported {ev.tag} in {parameter.tag} automation")
+            if any(key.startswith("CurveControl") for key in ev.attrib):
+                raise ReaderError("Curved tempo automation is not supported")
+            beat = number(ev, "Time", "automation beat")
+            out.append((beat, decode(number(ev, "Value", f"{parameter.tag} value"))))
+        # Stable sorting retains the two sides of a vertical tempo jump.
+        return sorted(out, key=lambda ev: ev[0])
 
-    # Convert the meter events into TempoPoint time-signature changes, then
-    # merge them into the tempo points so bar/beat counting stays consistent.
-    points = _apply_meters(tempo_points, meter_events)
+    def bpm(value):
+        if value <= 0:
+            raise ReaderError("Tempo must be positive")
+        return value
+
+    def meter(value):
+        # EnumEvent value, NOT numerator/denominator bit packing. Independent
+        # primary implementations: DawVert r_ableton.py and ableton-live-tools.
+        if not value.is_integer() or not 0 <= value <= 494:
+            raise ReaderError("Unsupported Ableton time-signature enum value")
+        den_index, num_index = divmod(int(value), 99)
+        return num_index + 1, 2 ** den_index
+
+    def initial_and_events(parameter, events, decode, default=None):
+        before = [value for beat, value in events if beat < 0]
+        nonnegative = [(beat, value) for beat, value in events if beat >= 0]
+        if before:
+            initial = before[-1]
+        elif nonnegative and nonnegative[0][0] == 0:
+            initial = nonnegative[0][1]
+        elif parameter is not None and parameter.find("Manual") is not None:
+            initial = decode(number(parameter.find("Manual"), "Value", f"{parameter.tag} Manual"))
+        elif default is not None:
+            initial = default
+            warnings.append("No time-signature data; assumed 4/4")
+        else:
+            raise ReaderError("No initial tempo automation or Manual tempo found")
+        return initial, nonnegative
+
+    raw_tempo = parsed_events(tempo, "FloatEvent", bpm)
+    initial_bpm, tempo_events = initial_and_events(tempo, raw_tempo, bpm)
+    tempo_points = [TempoPoint(0, 0, initial_bpm, ramp_domain="beat")]
+    if tempo_events and tempo_events[0][0] == 0:
+        tempo_points = []  # beat-zero automation overrides the pre-roll value
+    for beat, value in tempo_events:
+        tempo_points.append(TempoPoint(beat, 0, value, ramp_domain="beat"))
+    # Pre-roll/Manual is held to the first actual breakpoint, not ramped from
+    # the negative sentinel. Real breakpoint pairs interpolate in beat space.
+    first_real = 1 if tempo_events and tempo_events[0][0] > 0 else 0
+    for i in range(first_real, len(tempo_points) - 1):
+        p, nxt = tempo_points[i:i + 2]
+        p.ramp = nxt.beat > p.beat and nxt.bpm != p.bpm
+    if any(p.ramp for p in tempo_points):
+        warnings.append("ALS ramp times use continuous beat-linear integration; Live playback tempo quantization is not emulated")
+
+    signature = mixer.find("TimeSignature")
+    raw_meters = parsed_events(signature, "EnumEvent", meter)
+    initial_meter, meter_events = initial_and_events(signature, raw_meters, meter, (4, 4))
+    meters = [(0, *initial_meter)] + [(beat, *value) for beat, value in meter_events]
+    points = _apply_meters(tempo_points, meters)
     _fill_times_from_beats(points)
-    points[-1].ramp = False
-    return TempoMap(path, _dedupe(points))
+    progress(1.0)
+    return TempoMap(path, _dedupe(points), warnings)
 
 
 def _apply_meters(tempo: list[TempoPoint], meters: list[tuple[float, int, int]]) -> list[TempoPoint]:
-    """Attach the correct (num, den) to each tempo point based on meter
-    automation. A meter change at or before a point's time applies to that point."""
+    """Insert every meter breakpoint, interpolating beat-linear tempo if needed."""
     if not meters:
         return tempo
     meters.sort(key=lambda m: m[0])
-    out: list[TempoPoint] = []
-    cur_num, cur_den = 4, 4
-    mi = 0
-    for p in tempo:
-        while mi < len(meters) and meters[mi][0] <= p.beat + 1e-9:
-            cur_num, cur_den = meters[mi][1], meters[mi][2]
+    out = list(tempo)
+    existing = {p.beat for p in tempo}
+    ti = 0
+    for beat, _, _ in meters:
+        if beat in existing:
+            continue
+        while ti + 1 < len(tempo) and tempo[ti + 1].beat <= beat:
+            ti += 1
+        p = tempo[ti]
+        value = p.bpm
+        if p.ramp and ti + 1 < len(tempo):
+            nxt = tempo[ti + 1]
+            value += (nxt.bpm - p.bpm) * (beat - p.beat) / (nxt.beat - p.beat)
+        out.append(TempoPoint(beat, 0, value, ramp=p.ramp, ramp_domain=p.ramp_domain))
+        existing.add(beat)
+    out.sort(key=lambda p: p.beat)
+    mi, num, den = 0, 4, 4
+    for p in out:
+        while mi < len(meters) and meters[mi][0] <= p.beat:
+            _, num, den = meters[mi]
             mi += 1
-        out.append(TempoPoint(p.beat, p.time, p.bpm, cur_num, cur_den, p.ramp))
+        p.num, p.den = num, den
     return out
 
 
@@ -289,7 +382,7 @@ def _dedupe(points: list[TempoPoint]) -> list[TempoPoint]:
     out: list[TempoPoint] = []
     for p in points:
         if out and abs(p.bpm - out[-1].bpm) < 1e-6 and (p.num, p.den) == (out[-1].num, out[-1].den) \
-                and not out[-1].ramp:
+                and not out[-1].ramp and not p.ramp:
             continue
         out.append(p)
     return out
@@ -338,12 +431,17 @@ def approximate(tm: TempoMap, opt: ExportOptions) -> list[tuple[float, float]]:
         n = max(1, math.ceil(span_q / opt.ramp_step - 1e-9))
         for k in range(n):
             q0, q1 = k * span_q / n, (k + 1) * span_q / n
-            t0 = _ramp_time_at(q0, p.bpm, nxt.bpm, span_t)
-            t1 = _ramp_time_at(q1, p.bpm, nxt.bpm, span_t)
+            if p.ramp_domain == "beat":
+                t0 = _beat_ramp_time_at(q0, p.bpm, nxt.bpm, span_q)
+                t1 = _beat_ramp_time_at(q1, p.bpm, nxt.bpm, span_q)
+            else:
+                t0 = _ramp_time_at(q0, p.bpm, nxt.bpm, span_t)
+                t1 = _ramp_time_at(q1, p.bpm, nxt.bpm, span_t)
             if opt.preserve_timing:
                 bpm = 60.0 * (q1 - q0) / (t1 - t0)
             else:
-                bpm = p.bpm + (nxt.bpm - p.bpm) * t0 / span_t
+                fraction = q0 / span_q if p.ramp_domain == "beat" else t0 / span_t
+                bpm = p.bpm + (nxt.bpm - p.bpm) * fraction
             steps.append((p.beat + q0, p.time + t0, bpm))
     # merge steps whose change is below the threshold
     merged: list[list[float]] = []
