@@ -6,3 +6,4 @@ build/
 dist/
 *.spec
 releases/
+test-projects/
