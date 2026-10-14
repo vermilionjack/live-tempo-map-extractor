@@ -59,6 +59,22 @@ class GuiTests(unittest.TestCase):
         path.write_text(f"TEMPO {bpm} 4 4\n")
         return path
 
+    def test_experimental_import_is_opt_in_and_labelled_in_gui(self):
+        source = Path(__file__).parent / 'fixtures' / 'studioone' / 'steps.song'
+        self.assertFalse(self.window.experimental_imports.isChecked())
+        self.window.add_paths([source])
+        self.wait(lambda: not self.window.jobs)
+        key = str(source.resolve())
+        self.assertNotIn(key, self.window.maps)
+        self.assertIn('Experimental', self.window.items[key].text(app.COL_STATUS))
+        self.window.experimental_imports.setChecked(True)
+        self.window.reload_selected()
+        self.wait(lambda: not self.window.jobs)
+        self.assertIn(key, self.window.maps)
+        self.assertIn('EXPERIMENTAL', self.window.items[key].text(app.COL_STATUS))
+        self.assertIn('EXPERIMENTAL', self.window.review_label.text())
+        self.assertTrue(self.window.table.rowCount() > 0)
+
     def test_duplicate_paths_in_one_add_are_read_once(self):
         source = self.source()
         original = core.read_tempo_map

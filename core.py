@@ -388,19 +388,44 @@ def _dedupe(points: list[TempoPoint]) -> list[TempoPoint]:
     return out
 
 
+from readers.ardour import read_ardour
+from readers.dawproject import read_dawproject
+from readers.lmms import read_lmms
+from readers.studioone import read_studioone
+
+# Experimental imports require explicit opt-in; registration is not a promise
+# of complete support for every DAW version or automation type.
+EXPERIMENTAL_EXTENSIONS = frozenset({".dawproject", ".mmp", ".mmpz", ".song"})
+UNIMPLEMENTED_EXTENSIONS = frozenset({".flp", ".ptx", ".bwproject", ".logicx", ".cpr", ".npr", ".vip"})
 READERS: dict[str, Callable[[Path, Progress], TempoMap]] = {
     ".mid": read_midi, ".midi": read_midi, ".smf": read_midi,
     ".rpp": read_rpp, ".als": read_als,
+    ".ardour": read_ardour, ".dawproject": read_dawproject,
+    ".mmp": read_lmms, ".mmpz": read_lmms, ".song": read_studioone,
 }
 SUPPORTED_EXTENSIONS = tuple(sorted(READERS))
 
 
-def read_tempo_map(path: Path, progress: Progress = lambda f: None) -> TempoMap:
-    reader = READERS.get(path.suffix.lower())
+def read_tempo_map(path: Path, progress: Progress = lambda f: None, *,
+                   allow_experimental: bool = False) -> TempoMap:
+    extension = path.suffix.lower()
+    reader = READERS.get(extension)
     if reader is None:
+        if extension in UNIMPLEMENTED_EXTENSIONS:
+            raise ReaderError(f"Native {extension} tempo-map import is not implemented / not supported yet")
         raise ReaderError(f"Unsupported file type '{path.suffix}'")
+    experimental = extension in EXPERIMENTAL_EXTENSIONS
+    if experimental and not allow_experimental:
+        raise ReaderError("Experimental format: enable 'Experimental imports' and reload. "
+                          "DAW-host compatibility and complete automation support are not confirmed.")
     try:
-        return reader(path, progress)
+        if extension == '.ardour' and allow_experimental:
+            result = read_ardour(path, progress, allow_experimental=True)
+        else:
+            result = reader(path, progress)
+        if experimental:
+            result.warnings.insert(0, "EXPERIMENTAL / HOST UNCONFIRMED: verify this tempo map before use.")
+        return result
     except ReaderError:
         raise
     except (IndexError, struct.error, ValueError) as exc:

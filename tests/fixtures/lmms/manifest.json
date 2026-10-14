@@ -1,0 +1,26 @@
+{
+  "revision": "94363be152f526edba4e884264d891f1361cf54b",
+  "fixtures": [
+    {
+      "file": "emptyproject.mmp",
+      "upstream_path": "tests/emptyproject.mmp",
+      "url": "https://raw.githubusercontent.com/LMMS/lmms/94363be152f526edba4e884264d891f1361cf54b/tests/emptyproject.mmp",
+      "sha256": "3aa0587475553dbc97bf61f89a9a7f4baa59ed2aff8122392718e1e32b143596",
+      "bytes": 15241
+    },
+    {
+      "file": "TobyDox-Psycho.mmpz",
+      "upstream_path": "data/projects/demos/TobyDox-Psycho.mmpz",
+      "url": "https://raw.githubusercontent.com/LMMS/lmms/94363be152f526edba4e884264d891f1361cf54b/data/projects/demos/TobyDox-Psycho.mmpz",
+      "sha256": "004d4ae0d093d56616e6227d311ff053a912235e1c797b5c70b5d937446d0505",
+      "bytes": 5787
+    },
+    {
+      "file": "Oglsdl-PpTrip.mmpz",
+      "upstream_path": "data/projects/demos/Oglsdl-PpTrip.mmpz",
+      "url": "https://raw.githubusercontent.com/LMMS/lmms/94363be152f526edba4e884264d891f1361cf54b/data/projects/demos/Oglsdl-PpTrip.mmpz",
+      "sha256": "4ec582dbfa753360d53a9502757f5256ce81e809a9eaae9798e701a23dd9b002",
+      "bytes": 26015
+    }
+  ]
+}

@@ -35,14 +35,19 @@ class WorkerSignals(QObject):
 
 
 class ReadJob(QRunnable):
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, allow_experimental=False):
         super().__init__()
         self.path, self.signals = path, WorkerSignals()
+        self.allow_experimental = allow_experimental
 
     def run(self):
         key = str(self.path)
         try:
-            tm = core.read_tempo_map(self.path, lambda f: self.signals.progress.emit(key, f))
+            progress = lambda f: self.signals.progress.emit(key, f)
+            if self.allow_experimental:
+                tm = core.read_tempo_map(self.path, progress, allow_experimental=True)
+            else:
+                tm = core.read_tempo_map(self.path, progress)
             self.signals.finished.emit(key, tm)
         except core.ReaderError as exc:
             self.signals.failed.emit(key, str(exc))
@@ -249,6 +254,11 @@ class MainWindow(QMainWindow):
         for act in (self.act_add, self.act_folder):
             b = QToolButton(); b.setDefaultAction(act); b.setToolButtonStyle(Qt.ToolButtonTextOnly)
             top.addWidget(b)
+        self.experimental_imports = QCheckBox("Experimental imports")
+        self.experimental_imports.setToolTip(
+            "Opt in to partial DAWproject, LMMS, Studio One and modern Ardour readers. "
+            "Not verified in the DAW; unsupported features are rejected. Enable then reload.")
+        top.addWidget(self.experimental_imports)
         top.addStretch()
         b = QToolButton(); b.setDefaultAction(self.act_remove); top.addWidget(b)
         root.addLayout(top)
@@ -380,7 +390,7 @@ class MainWindow(QMainWindow):
         generation = self._generations[key] = object()
         self._set_status(item, "reading", "Queued", progress=0.0)
         item.setText(COL_POINTS, ""); item.setText(COL_BPM, "")
-        job = ReadJob(path)
+        job = ReadJob(path, self.experimental_imports.isChecked())
         self._start(job, generation)
 
     def _start(self, job, generation, exporting=False):
@@ -406,6 +416,8 @@ class MainWindow(QMainWindow):
         if tm.warnings:
             text += " · ⚠"
             item.setToolTip(COL_STATUS, "\n".join(tm.warnings))
+        if any("experimental" in warning.lower() for warning in tm.warnings):
+            text = "EXPERIMENTAL · " + text
         self._set_status(item, "ok", text)
         item.setText(COL_POINTS, str(len(tm.points)))
         item.setText(COL_BPM, f"{lo:.1f}" if abs(hi - lo) < 0.05 else f"{lo:.1f}–{hi:.1f}")
