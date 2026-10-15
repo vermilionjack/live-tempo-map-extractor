@@ -16,7 +16,7 @@ Native FL Studio, Bitwig, Logic, Pro Tools, Cubase, Nuendo and Samplitude tempo-
 ## Tests
     QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 
-Version **v.0.1.2** includes the corrected readers, GUI lifecycle fixes, opt-in experimental imports, and a Windows Qt runtime compatible with CrossOver's bundled Wine. Download the Windows x64 executable or macOS Apple Silicon ZIP from Releases. The macOS build is not notarized, and the Windows executable is unsigned. See release notes for platform-specific Qt versions and compatibility test details.
+Version **v.0.1.3** preserves the detected source-project duration in exported MIDI tempo maps. It also includes the corrected readers, GUI lifecycle fixes, opt-in experimental imports, and a Windows Qt runtime compatible with CrossOver's bundled Wine. Download the Windows x64 executable or macOS Apple Silicon ZIP from Releases. The macOS build is not notarized, and the Windows executable is unsigned. See release notes for platform-specific Qt versions and compatibility test details.
 
 ## Keyboard
 | Action | Shortcut |
