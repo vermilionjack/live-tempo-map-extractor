@@ -16,7 +16,7 @@ from typing import NoReturn
 
 
 def read_studioone(path: Path, progress):
-    from core import ReaderError, TempoMap, TempoPoint, _fill_times_from_beats
+    from core import ReaderError, TempoMap, TempoPoint, _beat_at_time, _fill_times_from_beats
 
     path = Path(path)
 
@@ -125,11 +125,14 @@ def read_studioone(path: Path, progress):
     _fill_times_from_beats(points)
     if any(not math.isfinite(p.time) for p in points):
         fail("integrated time is non-finite")
+    project_length = number(root, "length") if root.get("length") is not None else None
+    project_end = (_beat_at_time(points, project_length)
+                   if project_length is not None and project_length >= 0 else None)
     progress(1.0)
     return TempoMap(path, points, [
         "EXPERIMENTAL / HOST UNCONFIRMED: Studio One 5.5.2 observed ZIP/XML "
         "step-tempo subset; synthetic-fixture verified, not native-host verified."
-    ])
+    ], project_end)
 
 
 read_song = read_studioone

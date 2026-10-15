@@ -49,9 +49,10 @@ def read_lmms(path, progress):
         if root.get('version', '1.0') != '1.0':
             raise ValueError('unsupported LMMS project schema version')
         head = root.find('head')
+        song = root.find('song')
         if len(root.findall('head')) != 1 or len(root.findall('song')) != 1:
             raise ValueError('missing or ambiguous LMMS head/song')
-        if head is None or root.find('song') is None:
+        if head is None or song is None:
             raise ValueError('missing LMMS head or song')
         values = []
         for key, default in zip(_KEYS, (140, 4, 4)):
@@ -130,7 +131,6 @@ def read_lmms(path, progress):
             if owner is None or owner.tag != 'track' or owner.get('type') not in ('5', '6'):
                 raise ValueError('unsupported tempo automation track')
             container = parents.get(owner)
-            song = root.find('song')
             if not (container is song or (container is not None and
                     container.tag == 'trackcontainer' and parents.get(container) is song)):
                 raise ValueError('nested/Beat+Bassline tempo automation is unsupported')
@@ -172,7 +172,21 @@ def read_lmms(path, progress):
             _fill_times_from_beats(points)
             warnings.append('Discrete tempo automation decoded at 48 ticks per quarter note; '
                             'LMMS audio-block/sample rounding is not emulated.')
+        arrangement_ends = []
+        for pattern in song.iter():
+            if pattern.tag not in ('pattern', 'automationpattern'):
+                continue
+            start = int(pattern.get('pos', '0'))
+            length = int(pattern.get('len', '0'))
+            if length <= 0:
+                length = max((int(note.get('pos', '0')) + int(note.get('len', '0'))
+                              for note in pattern.iter('note')), default=0)
+            if start < 0 or length < 0:
+                raise ValueError('negative arrangement pattern extent')
+            if length:
+                arrangement_ends.append((start + length) / 48.0)
+        project_end = max(arrangement_ends) if arrangement_ends else None
         progress(1.0)
-        return TempoMap(path, points, warnings)
+        return TempoMap(path, points, warnings, project_end)
     except (OSError, ValueError, TypeError, ET.ParseError, zlib.error) as exc:
         raise ReaderError(f'LMMS: {exc}') from exc

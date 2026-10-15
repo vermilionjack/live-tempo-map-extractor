@@ -47,6 +47,7 @@ def read_dawproject(path, progress):
         result = TempoMap(Path(path), [TempoPoint(0.0, 0.0, bpm, num, den)],
                           ['Experimental DAWproject reader: tempo/meter only; DAW playback round-trip unverified.'])
         arrangement = root.find('Arrangement')
+        clip_ends = []
         if len(root.findall('Arrangement')) > 1:
             raise ReaderError('Multiple DAWproject arrangements are unsupported')
         if arrangement is not None:
@@ -99,6 +100,23 @@ def read_dawproject(path, progress):
 
             tempo_unit, events = timeline('TempoAutomation', tempo, 'RealPoint')
             meter_unit, meters = timeline('TimeSignatureAutomation', meter, 'TimeSignaturePoint')
+            parents = {child: parent for parent in arrangement.iter() for child in parent}
+            for clip in arrangement.iter('Clip'):
+                try:
+                    start, duration = float(clip.attrib['time']), float(clip.attrib['duration'])
+                except (KeyError, ValueError):
+                    continue
+                if not math.isfinite(start) or not math.isfinite(duration) or start < 0 or duration < 0:
+                    raise ReaderError('Invalid DAWproject arrangement clip extent')
+                unit = clip.get('timeUnit', 'beats')
+                parent = parents.get(clip)
+                while parent is not None and 'timeUnit' not in parent.attrib:
+                    parent = parents.get(parent)
+                if parent is not None:
+                    unit = clip.get('timeUnit', parent.get('timeUnit', unit))
+                if unit not in ('beats', 'seconds'):
+                    raise ReaderError('Unsupported DAWproject arrangement clip time unit')
+                clip_ends.append((start + duration, unit == 'seconds'))
             if not events or events[0][0] > 0:
                 events.insert(0, (0.0, bpm, False))
             # Native tempo coordinates define exact beat/time correspondence.
@@ -153,6 +171,9 @@ def read_dawproject(path, progress):
                 num, den = meter_changes.get(beat, (num, den))
                 result.points.append(TempoPoint(q, time, value, num, den, ramp,
                                                'beat' if tempo_unit == 'beats' else 'time'))
+            if clip_ends:
+                result.project_end_beat = max(coordinate(end, seconds)[0]
+                                               for end, seconds in clip_ends)
         if any(not all(math.isfinite(value) for value in (point.beat, point.time, point.bpm))
                or point.bpm <= 0 for point in result.points):
             raise ReaderError('DAWproject tempo arithmetic exceeds supported numeric range')

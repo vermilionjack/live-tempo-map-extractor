@@ -23,6 +23,10 @@ class StudioOneTests(unittest.TestCase):
         self.assertTrue(all(not p.ramp for p in result.points))
         self.assertTrue(any("EXPERIMENTAL" in w for w in result.warnings))
 
+    def test_project_end_seconds_convert_through_tempo_map(self):
+        result = self.changed('x:id="Root"', 'x:id="Root" length="30"')
+        self.assertEqual(result.project_end_beat, 49)
+
     def changed(self, old, new):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "changed.song"

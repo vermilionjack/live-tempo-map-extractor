@@ -67,6 +67,8 @@ class DawprojectTests(unittest.TestCase):
         simple = reader(FIXTURES / 'bitwig_simple.dawproject', lambda _: None)
         extended = reader(FIXTURES / 'bitwig_extended.dawproject', lambda _: None)
         self.assertEqual(simple.points[0].bpm, 149)
+        self.assertEqual(simple.project_end_beat, 8)
+        self.assertEqual(extended.project_end_beat, 8)
         self.assertEqual([(p.beat, p.time, p.bpm, p.ramp) for p in extended.points],
                          [(0, 0, 120, False), (4, 2, 140, False)])
         self.assertTrue(any('legacy' in warning.lower() for warning in extended.warnings))

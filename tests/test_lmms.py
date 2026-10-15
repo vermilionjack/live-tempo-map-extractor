@@ -54,6 +54,11 @@ class LmmsTests(unittest.TestCase):
         self.assertAlmostEqual(result.points[1].time, 2)
         self.assertAlmostEqual(result.points[2].time, 2 + 8 / 3)
 
+    def test_project_end_comes_from_last_arrangement_pattern(self):
+        song = '<trackcontainer><track><pattern pos="48" len="240"/></track></trackcontainer>'
+        result = self.read_xml(project('<bpm value="120"/>', song))
+        self.assertEqual(result.project_end_beat, 6)
+
     def test_reject_interpolated_tempo(self):
         for prog in ('1', '2'):
             with self.subTest(prog=prog), self.assertRaisesRegex(ReaderError, 'interpolat'):

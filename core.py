@@ -35,6 +35,7 @@ class TempoMap:
     source: Path
     points: list[TempoPoint]
     warnings: list[str] = field(default_factory=list)
+    project_end_beat: Optional[float] = None
 
     @property
     def bpm_range(self) -> tuple[float, float]:
@@ -115,7 +116,7 @@ def read_midi(path: Path, progress: Progress) -> TempoMap:
     if division & 0x8000:
         raise ReaderError("SMPTE time division is not supported")
     ppq = division
-    pos, events = 8 + struct.unpack(">I", data[4:8])[0], []
+    pos, events, end_tick = 8 + struct.unpack(">I", data[4:8])[0], [], 0
     for t in range(ntracks):
         if data[pos:pos + 4] != b"MTrk":
             raise ReaderError(f"Track {t + 1} is damaged")
@@ -146,6 +147,7 @@ def read_midi(path: Path, progress: Progress) -> TempoMap:
                 elif mtype == 0x58 and ln >= 2:
                     events.append((tick, "ts", (payload[0], 2 ** payload[1])))
                 elif mtype == 0x2F:
+                    end_tick = max(end_tick, tick)
                     break
             elif status in (0xF0, 0xF7):
                 ln = 0
@@ -174,7 +176,7 @@ def read_midi(path: Path, progress: Progress) -> TempoMap:
         else:
             last.num, last.den = val
     _fill_times_from_beats(points)
-    return TempoMap(path, _dedupe(points), warnings)
+    return TempoMap(path, _dedupe(points), warnings, end_tick / ppq)
 
 
 _PT = re.compile(r"^\s*PT\s+(\S+)\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?")
@@ -207,7 +209,72 @@ def read_rpp(path: Path, progress: Progress) -> TempoMap:
         points.insert(0, TempoPoint(0, 0, points[0].bpm, base.num, base.den))
     points[-1].ramp = False
     _fill_beats_from_times(points)
-    return TempoMap(path, _dedupe(points))
+    end_seconds = _rpp_project_end(text)
+    end_beat = _beat_at_time(points, end_seconds) if end_seconds is not None else None
+    return TempoMap(path, _dedupe(points), project_end_beat=end_beat)
+
+
+def _rpp_project_end(text: str) -> Optional[float]:
+    """Find the latest media-item or region end in a REAPER project."""
+    ends = []
+    item_depth = None
+    item_position = item_length = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if item_depth is None and stripped.startswith("<ITEM"):
+            item_depth, item_position, item_length = 1, None, None
+            continue
+        if item_depth is not None:
+            if item_depth == 1:
+                match = re.match(r"(?:POSITION|LENGTH)\s+(\S+)", stripped)
+                if match:
+                    value = float(match.group(1))
+                    if not math.isfinite(value) or value < 0:
+                        raise ReaderError("Invalid REAPER item timeline extent")
+                    if stripped.startswith("POSITION"):
+                        item_position = value
+                    else:
+                        item_length = value
+            if stripped.startswith("<"):
+                item_depth += 1
+            elif stripped == ">":
+                item_depth -= 1
+                if item_depth == 0:
+                    if item_position is not None and item_length is not None:
+                        ends.append(item_position + item_length)
+                    item_depth = None
+        region = re.match(r"REGION\s+\S+\s+\S+\s+(\S+)", stripped)
+        if region:
+            end = float(region.group(1))
+            if math.isfinite(end) and end >= 0:
+                ends.append(end)
+    return max(ends) if ends else None
+
+
+def _beat_at_time(points: list[TempoPoint], time: float) -> float:
+    """Convert absolute seconds to quarter notes through a tempo map."""
+    if time <= points[0].time:
+        return points[0].beat
+    for point, nxt in zip(points, points[1:]):
+        if time <= nxt.time:
+            lo, hi = point.beat, nxt.beat
+            for _ in range(60):
+                mid = (lo + hi) / 2
+                if point.ramp and point.ramp_domain == "beat":
+                    elapsed = _beat_ramp_time_at(mid - point.beat, point.bpm, nxt.bpm,
+                                                 nxt.beat - point.beat)
+                elif point.ramp:
+                    elapsed = _ramp_time_at(mid - point.beat, point.bpm, nxt.bpm,
+                                            nxt.time - point.time)
+                else:
+                    elapsed = (mid - point.beat) * 60 / point.bpm
+                if point.time + elapsed < time:
+                    lo = mid
+                else:
+                    hi = mid
+            return (lo + hi) / 2
+    last = points[-1]
+    return last.beat + (time - last.time) * last.bpm / 60
 
 
 def read_als(path: Path, progress: Progress) -> TempoMap:
@@ -345,7 +412,25 @@ def read_als(path: Path, progress: Progress) -> TempoMap:
     points = _apply_meters(tempo_points, meters)
     _fill_times_from_beats(points)
     progress(1.0)
-    return TempoMap(path, _dedupe(points), warnings)
+    parents = {child: parent for parent in live_set.iter() for child in parent}
+    arrangement_ends = []
+    for clip in live_set.iter():
+        if clip.tag not in ("AudioClip", "MidiClip"):
+            continue
+        ancestor = parents.get(clip)
+        in_arrangement = False
+        while ancestor is not None:
+            if ancestor.tag == "ArrangerAutomation":
+                in_arrangement = True
+                break
+            ancestor = parents.get(ancestor)
+        current_end = clip.find("CurrentEnd")
+        if in_arrangement and current_end is not None:
+            end = float(current_end.get("Value", "nan"))
+            if math.isfinite(end) and end >= 0:
+                arrangement_ends.append(end)
+    project_end = max(arrangement_ends) if arrangement_ends else None
+    return TempoMap(path, _dedupe(points), warnings, project_end)
 
 
 def _apply_meters(tempo: list[TempoPoint], meters: list[tuple[float, int, int]]) -> list[TempoPoint]:
@@ -511,11 +596,18 @@ def write_midi(tm: TempoMap, dest: Path, opt: ExportOptions) -> int:
         us = max(1, min(0xFFFFFF, round(60e6 / bpm)))
         events.append((round(q * opt.ppq), 2, b"\xFF\x51\x03" + us.to_bytes(3, "big")))
     events.sort(key=lambda e: (e[0], e[1]))
+    last_event_tick = max(tick for tick, _, _ in events)
+    last_point = tm.points[-1]
+    fallback_end = last_point.beat + last_point.num * 4 / last_point.den
+    project_end = tm.project_end_beat if tm.project_end_beat is not None else fallback_end
+    if project_end <= 0 and last_point.beat <= 0:
+        project_end = fallback_end
+    end_tick = max(math.ceil(max(project_end, last_point.beat) * opt.ppq), last_event_tick + 1)
     body, now = bytearray(), 0
     for tick, _, ev in events:
         body += _vlq(tick - now) + ev
         now = tick
-    body += b"\x00\xFF\x2F\x00"
+    body += _vlq(end_tick - now) + b"\xFF\x2F\x00"
     header = b"MThd" + struct.pack(">IHHH", 6, 1, 1, opt.ppq)
     dest.write_bytes(header + b"MTrk" + struct.pack(">I", len(body)) + bytes(body))
     return len(steps)

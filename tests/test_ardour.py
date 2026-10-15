@@ -29,6 +29,7 @@ class ArdourTests(unittest.TestCase):
         result = read_ardour(FIXTURES / "TestSession.ardour")
         p = result.points[0]
         self.assertEqual((p.beat, p.time, p.bpm, p.num, p.den), (0, 0, 145, 5, 4))
+        self.assertGreater(result.project_end_beat, 17000)
 
     def test_legacy_invalid_or_unsupported_never_falls_back(self):
         cases = [

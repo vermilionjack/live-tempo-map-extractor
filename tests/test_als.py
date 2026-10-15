@@ -69,6 +69,7 @@ class ALSFixtureTests(unittest.TestCase):
         tm = core.read_tempo_map(FIXTURES / "example-140.als")
         self.assertEqual([(p.beat, p.time, p.bpm, p.num, p.den, p.ramp) for p in tm.points],
                          [(0, 0, 140, 4, 4, False)])
+        self.assertGreater(tm.project_end_beat, 9000)
 
     def test_real_live10_and_live12_ramps(self):
         for name in ("automation.als", "L12-automation.als"):

@@ -17,7 +17,7 @@ def read_ardour(path, progress=None, *, allow_experimental=False):
     displayed by callers. Ramps, BBT resets and legacy frame/pulse maps fail.
     No sample-rate or superclock-rate defaults are used.
     """
-    from core import ReaderError, TempoMap, TempoPoint
+    from core import ReaderError, TempoMap, TempoPoint, _beat_at_time
 
     path = Path(path)
     if progress:
@@ -35,6 +35,33 @@ def read_ardour(path, progress=None, *, allow_experimental=False):
     maps = root.findall("TempoMap")
     if len(maps) != 1:
         raise ReaderError("Ardour requires exactly one TempoMap")
+
+    def project_end(points, ticks_per_second):
+        if not ticks_per_second or ticks_per_second <= 0:
+            return None
+
+        def seconds(raw):
+            value = float(raw[1:] if raw.startswith("a") else raw)
+            return value / ticks_per_second
+
+        ends = []
+        for region in root.iter("Region"):
+            try:
+                end = seconds(region.attrib["position"]) + seconds(region.attrib["length"])
+            except (KeyError, ValueError):
+                continue
+            if math.isfinite(end) and end >= 0:
+                ends.append(end)
+        for location in root.iter("Location"):
+            if "IsRangeMarker" not in location.get("flags", ""):
+                continue
+            try:
+                end = seconds(location.attrib["end"])
+            except (KeyError, ValueError):
+                continue
+            if math.isfinite(end) and end >= 0:
+                ends.append(end)
+        return max((_beat_at_time(points, end) for end in ends), default=None)
     def number(element, name, positive=True):
         try:
             value = float(element.attrib[name])
@@ -164,7 +191,8 @@ def read_ardour(path, progress=None, *, allow_experimental=False):
             points.append(TempoPoint(beat, seconds, bpm, *signature))
         result = TempoMap(path, points, warnings=[
             "Experimental Ardour Temporal reader: source-verified constant segments only; "
-            "no real modern session fixture or Ardour-host validation."])
+            "no real modern session fixture or Ardour-host validation."],
+            project_end_beat=project_end(points, rate))
         if progress:
             progress(1.0)
         return result
@@ -198,7 +226,12 @@ def read_ardour(path, progress=None, *, allow_experimental=False):
     bpm = npm * (4.0 / note)
     if not math.isfinite(bpm) or bpm <= 0:
         raise ReaderError("Invalid Ardour quarter-note tempo")
-    result = TempoMap(path, [TempoPoint(0, 0, bpm, num, den)])
+    points = [TempoPoint(0, 0, bpm, num, den)]
+    try:
+        sample_rate = float(root.attrib["sample-rate"])
+    except (KeyError, ValueError):
+        sample_rate = 0
+    result = TempoMap(path, points, project_end_beat=project_end(points, sample_rate))
     if progress:
         progress(1.0)
     return result
